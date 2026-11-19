@@ -43,6 +43,7 @@ jobs:
             mkdir -p "$HOME/.android"
             printf '%s' "$KEYSTORE" | base64 --decode > "$HOME/.android/debug.keystore"
             chmod 600 "$HOME/.android/debug.keystore"
+            echo "BLACKBOX_DEBUG_KEYSTORE=$HOME/.android/debug.keystore" >> "$GITHUB_ENV"
           fi
       - name: Host tests
         run: sh test.sh
@@ -61,6 +62,10 @@ jobs:
           cp app/build/outputs/apk/debug/app-debug.apk "artifacts/$prefix-debug.apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs \
             "artifacts/$prefix-debug.apk" > artifacts/SIGNING-CERTIFICATE.txt
+          if [ -n "${BLACKBOX_DEBUG_KEYSTORE:-}" ]; then
+            grep -F "Signer #1 certificate SHA-256 digest: 79bace43a9749111312d73f34147102c2fc97df6bfcdddaf0a96ccc4ceffcabb" \
+              artifacts/SIGNING-CERTIFICATE.txt
+          fi
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging \
             "artifacts/$prefix-debug.apk" > artifacts/APK-METADATA.txt
           grep -F "versionName='$version'" artifacts/APK-METADATA.txt
