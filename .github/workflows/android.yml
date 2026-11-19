@@ -1,0 +1,103 @@
+name: Android development APK
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Select JDK 17
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          gradle-version: "8.11.1"
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Install exact Android SDK build inputs
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Restore private development signing key
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then
+            if [ "$REF_TYPE" = tag ]; then
+              echo "Tag builds require the maintained development signing key." >&2
+              exit 1
+            fi
+            echo "No maintained key: test artifact only; not upgrade-compatible."
+          else
+            mkdir -p "$HOME/.android"
+            printf '%s' "$KEYSTORE" | base64 --decode > "$HOME/.android/debug.keystore"
+            chmod 600 "$HOME/.android/debug.keystore"
+          fi
+      - name: Host tests
+        run: sh test.sh
+      - name: Build and lint
+        run: gradle --no-daemon :app:assembleDebug :app:lintDebug
+      - name: Assemble experimental artifacts
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n "s/.*versionName '\([^']*\)'.*/\1/p" app/build.gradle)
+          test -n "$version"
+          if [ "$REF_TYPE" = tag ]; then test "$REF_NAME" = "v$version"; fi
+          mkdir -p artifacts
+          prefix="blackbox-companion-app-$version"
+          cp app/build/outputs/apk/debug/app-debug.apk "artifacts/$prefix-debug.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs \
+            "artifacts/$prefix-debug.apk" > artifacts/SIGNING-CERTIFICATE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging \
+            "artifacts/$prefix-debug.apk" > artifacts/APK-METADATA.txt
+          grep -F "versionName='$version'" artifacts/APK-METADATA.txt
+          git archive --format=tar.gz --prefix="$prefix/" HEAD > "artifacts/$prefix-source.tar.gz"
+          cp LICENSE artifacts/LICENSE
+          printf 'Experimental development-signed APK. Not a production release.\nFirmware: https://github.com/guysoft/blackbox-fm1\nSource commit: %s\n' \
+            "$(git rev-parse HEAD)" > artifacts/RELEASE-NOTES.md
+          (cd artifacts && sha256sum * > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-development-apk
+          path: artifacts/*
+          if-no-files-found: error
+      - name: Remove temporary signing key
+        if: always()
+        run: |
+          if [ -f "$HOME/.android/debug.keystore" ]; then
+            shred -u "$HOME/.android/debug.keystore"
+          fi
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: android-development-apk
+          path: release
+      - name: Publish development pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" release/* --verify-tag --prerelease \
+            --title "Blackbox Companion $RELEASE_TAG — development APK" \
+            --notes-file release/RELEASE-NOTES.md
